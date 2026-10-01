@@ -1067,6 +1067,8 @@ func getCpObjMetadataFromHeader(ctx context.Context, r *http.Request, userMeta m
 		if err != nil {
 			return nil, err
 		}
+		// CVE-2026-34204: replication never sends SSE headers via CopyObject.
+		dropReplicationSSEMetadata(emetadata)
 		if sc != "" {
 			emetadata[xhttp.AmzStorageClass] = sc
 		}
@@ -1862,6 +1864,9 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
+	if !isTrustedReplicationRequest(ctx, r, r.Header, bucket, object) { // CVE-2026-34204
+		dropReplicationSSEMetadata(metadata)
+	}
 
 	if objTags := r.Header.Get(xhttp.AmzObjectTagging); objTags != "" {
 		if _, err := tags.ParseObjectTags(objTags); err != nil {
@@ -2424,6 +2429,9 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			m, err := extractMetadata(ctx, textproto.MIMEHeader(hdrs))
 			if err != nil {
 				return err
+			}
+			if !isTrustedReplicationRequest(ctx, r, hdrs, bucket, object) { // CVE-2026-34204
+				dropReplicationSSEMetadata(m)
 			}
 			maps.Copy(metadata, m)
 		} else {

@@ -117,7 +117,7 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 			return
 		}
 
-		_, sourceReplReq := r.Header[xhttp.MinIOSourceReplicationRequest]
+		sourceReplReq := isTrustedReplicationRequest(ctx, r, r.Header, bucket, object) // CVE-2026-34204
 		ssecRepHeaders := []string{
 			"X-Minio-Replication-Server-Side-Encryption-Seal-Algorithm",
 			"X-Minio-Replication-Server-Side-Encryption-Sealed-Key",
@@ -146,6 +146,9 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
+	}
+	if !isTrustedReplicationRequest(ctx, r, r.Header, bucket, object) { // CVE-2026-34204
+		dropReplicationSSEMetadata(metadata)
 	}
 
 	if objTags := r.Header.Get(xhttp.AmzObjectTagging); objTags != "" {

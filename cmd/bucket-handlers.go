@@ -1259,6 +1259,8 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
+	// CVE-2026-34204: replication never uses PostPolicy.
+	dropReplicationSSEMetadata(metadata)
 
 	rawReader := hashReader
 	pReader := NewPutObjReader(rawReader)

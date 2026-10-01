@@ -34,6 +34,7 @@ import (
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/mcontext"
 	xnet "github.com/minio/pkg/v3/net"
+	"github.com/minio/pkg/v3/policy"
 )
 
 const (
@@ -112,6 +113,29 @@ var replicationToInternalHeaders = map[string]string{
 	"X-Minio-Replication-Actual-Object-Size":                    "X-Minio-Internal-Actual-Object-Size",
 	ReplicationSsecChecksumHeader:                               ReplicationSsecChecksumHeader,
 	// Add more supported headers here.
+}
+
+// isTrustedReplicationRequest reports whether hdr carries the source-replication
+// marker and the caller of r holds s3:ReplicateObject on bucket/object.
+//
+// CVE-2026-34204 (GHSA-3rh2-v3gr-35p9): replication SSE headers must only be
+// honored for such requests, the marker alone is attacker controlled.
+func isTrustedReplicationRequest(ctx context.Context, r *http.Request, hdr http.Header, bucket, object string) bool {
+	if _, ok := hdr[xhttp.MinIOSourceReplicationRequest]; !ok {
+		return false
+	}
+	return isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction) == ErrNone
+}
+
+// dropReplicationSSEMetadata removes the internal metadata that
+// extractMetadataFromMime derives from X-Minio-Replication-* headers.
+// CVE-2026-34204: call it for every request that is not a trusted replication
+// request, otherwise any s3:PutObject caller can inject bogus sealed keys and
+// make objects permanently unreadable.
+func dropReplicationSSEMetadata(metadata map[string]string) {
+	for _, internal := range replicationToInternalHeaders {
+		delete(metadata, internal)
+	}
 }
 
 // isDirectiveValid - check if tagging-directive is valid.

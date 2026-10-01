@@ -487,10 +487,13 @@ func completeMultipartOpts(ctx context.Context, r *http.Request, bucket, object 
 	}
 	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok {
 		opts.ReplicationRequest = true
-		opts.UserDefined[ReservedMetadataPrefix+"Actual-Object-Size"] = r.Header.Get(xhttp.MinIOReplicationActualObjectSize)
 	}
-	if r.Header.Get(ReplicationSsecChecksumHeader) != "" {
-		opts.UserDefined[ReplicationSsecChecksumHeader] = r.Header.Get(ReplicationSsecChecksumHeader)
+	// CVE-2026-34204: only trusted replication requests may set these.
+	if isTrustedReplicationRequest(ctx, r, r.Header, bucket, object) {
+		opts.UserDefined[ReservedMetadataPrefix+"Actual-Object-Size"] = r.Header.Get(xhttp.MinIOReplicationActualObjectSize)
+		if r.Header.Get(ReplicationSsecChecksumHeader) != "" {
+			opts.UserDefined[ReplicationSsecChecksumHeader] = r.Header.Get(ReplicationSsecChecksumHeader)
+		}
 	}
 	return opts, nil
 }
