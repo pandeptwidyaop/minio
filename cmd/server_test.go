@@ -128,6 +128,9 @@ func runAllTests(suite *TestSuiteCommon, c *check) {
 	suite.TestBucketSQSNotificationWebHook(c)
 	suite.TestBucketSQSNotificationAMQP(c)
 	suite.TestUnsignedCVE(c)
+	suite.TestUnsignedTrailerQueryCredentialCVE(c)
+	suite.TestSnowballUnsignedTrailerCVE(c)
+	suite.TestUnsignedTrailerLegitUploads(c)
 	suite.TearDownSuite(c)
 }
 
