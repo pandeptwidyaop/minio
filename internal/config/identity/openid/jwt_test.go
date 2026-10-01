@@ -19,10 +19,13 @@ package openid
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -88,52 +91,35 @@ func initJWKSServer() *httptest.Server {
 	return server
 }
 
+// TestJWTHMACType verifies that an HS256 ID token signed with the OIDC
+// client secret is rejected (CVE-2026-33322 / GHSA-5cx5-wh4m-82fh). The
+// client secret is a shared credential and must never be usable to forge
+// identity tokens; only the provider's asymmetric JWKS keys are trusted.
 func TestJWTHMACType(t *testing.T) {
 	server := initJWKSServer()
 	defer server.Close()
 
-	jwt := &jwtgo.Token{
-		Method: jwtgo.SigningMethodHS256,
-		Claims: jwtgo.StandardClaims{
-			ExpiresAt: 253428928061,
-			Audience:  "76b95ae5-33ef-4283-97b7-d2a85dc2d8f4",
-		},
-		Header: map[string]any{
-			"typ": "JWT",
-			"alg": jwtgo.SigningMethodHS256.Alg(),
-			"kid": "76b95ae5-33ef-4283-97b7-d2a85dc2d8f4",
-		},
-	}
-
-	token, err := jwt.SignedString([]byte("WNGvKVyyNmXq0TraSvjaDN9CtpFgx35IXtGEffMCPR0"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	fmt.Println(token)
+	const (
+		clientID     = "76b95ae5-33ef-4283-97b7-d2a85dc2d8f4"
+		clientSecret = "WNGvKVyyNmXq0TraSvjaDN9CtpFgx35IXtGEffMCPR0"
+	)
 
 	u1, err := xnet.ParseHTTPURL(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pubKeys := publicKeys{
-		RWMutex: &sync.RWMutex{},
-		pkMap:   map[string]any{},
-	}
-	pubKeys.add("76b95ae5-33ef-4283-97b7-d2a85dc2d8f4", []byte("WNGvKVyyNmXq0TraSvjaDN9CtpFgx35IXtGEffMCPR0"))
-
-	if len(pubKeys.pkMap) != 1 {
-		t.Fatalf("Expected 1 keys, got %d", len(pubKeys.pkMap))
-	}
-
 	provider := providerCfg{
-		ClientID:     "76b95ae5-33ef-4283-97b7-d2a85dc2d8f4",
-		ClientSecret: "WNGvKVyyNmXq0TraSvjaDN9CtpFgx35IXtGEffMCPR0",
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
 	}
 	provider.JWKS.URL = u1
 	cfg := Config{
 		Enabled: true,
-		pubKeys: pubKeys,
+		pubKeys: publicKeys{
+			RWMutex: &sync.RWMutex{},
+			pkMap:   map[string]any{},
+		},
 		arnProviderCfgsMap: map[arn.ARN]*providerCfg{
 			DummyRoleARN: &provider,
 		},
@@ -145,9 +131,108 @@ func TestJWTHMACType(t *testing.T) {
 		},
 	}
 
+	// Load keys exactly as the server does at startup.
+	if err = cfg.PopulatePublicKey(DummyRoleARN); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, method := range []*jwtgo.SigningMethodHMAC{
+		jwtgo.SigningMethodHS256, jwtgo.SigningMethodHS384, jwtgo.SigningMethodHS512,
+	} {
+		// Forged token: attacker-chosen identity, signed with the client secret.
+		jwt := jwtgo.NewWithClaims(method, jwtgo.MapClaims{
+			"exp":    253428928061,
+			"aud":    clientID,
+			"sub":    "attacker",
+			"policy": "consoleAdmin",
+		})
+		jwt.Header["kid"] = clientID
+
+		token, err := jwt.SignedString([]byte(clientSecret))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var claims jwtgo.MapClaims
+		if err = cfg.Validate(t.Context(), DummyRoleARN, token, "", "", claims); err == nil {
+			t.Fatalf("%s token signed with the client secret must be rejected", method.Alg())
+		}
+	}
+}
+
+// TestJWTRS256FromJWKS verifies that a valid RS256 ID token signed by a key
+// published in the provider's JWKS is still accepted.
+func TestJWTRS256FromJWKS(t *testing.T) {
+	const (
+		clientID = "76b95ae5-33ef-4283-97b7-d2a85dc2d8f4"
+		kid      = "test-rsa-key"
+	)
+
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.RawURLEncoding
+	jwks := fmt.Sprintf(`{"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":%q,"n":%q,"e":%q}]}`,
+		kid,
+		b64.EncodeToString(privKey.N.Bytes()),
+		b64.EncodeToString(big.NewInt(int64(privKey.E)).Bytes()))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(jwks))
+	}))
+	defer server.Close()
+
+	u1, err := xnet.ParseHTTPURL(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	provider := providerCfg{
+		ClientID:     clientID,
+		ClientSecret: "WNGvKVyyNmXq0TraSvjaDN9CtpFgx35IXtGEffMCPR0",
+	}
+	provider.JWKS.URL = u1
+	cfg := Config{
+		Enabled: true,
+		pubKeys: publicKeys{
+			RWMutex: &sync.RWMutex{},
+			pkMap:   map[string]any{},
+		},
+		arnProviderCfgsMap: map[arn.ARN]*providerCfg{
+			DummyRoleARN: &provider,
+		},
+		ProviderCfgs: map[string]*providerCfg{
+			"1": &provider,
+		},
+		closeRespFn: func(rc io.ReadCloser) {
+			rc.Close()
+		},
+	}
+
+	if err = cfg.PopulatePublicKey(DummyRoleARN); err != nil {
+		t.Fatal(err)
+	}
+
+	jwt := jwtgo.NewWithClaims(jwtgo.SigningMethodRS256, jwtgo.MapClaims{
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"aud": clientID,
+		"sub": "user",
+	})
+	jwt.Header["kid"] = kid
+	token, err := jwt.SignedString(privKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var claims jwtgo.MapClaims
 	if err = cfg.Validate(t.Context(), DummyRoleARN, token, "", "", claims); err != nil {
-		t.Fatal(err)
+		t.Fatalf("valid RS256 token from JWKS was rejected: %v", err)
+	}
+
+	// The same token with a tampered payload must be rejected.
+	if err = cfg.Validate(t.Context(), DummyRoleARN, token+"x", "", "", claims); err == nil {
+		t.Fatal("tampered RS256 token must be rejected")
 	}
 }
 

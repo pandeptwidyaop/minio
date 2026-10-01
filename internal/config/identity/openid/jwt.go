@@ -79,8 +79,9 @@ func (r *Config) PopulatePublicKey(arn arn.ARN) error {
 		return nil
 	}
 
-	// Add client secret for the client ID for HMAC based signature.
-	r.pubKeys.add(pCfg.ClientID, []byte(pCfg.ClientSecret))
+	// CVE-2026-33322: the client secret must never be registered as an
+	// HMAC verification key, it would let anyone who knows it forge ID
+	// tokens. Only the provider's asymmetric JWKS keys are trusted.
 
 	client := &http.Client{
 		Transport: r.transport,
@@ -134,16 +135,20 @@ const (
 
 // Validate - validates the id_token.
 func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, dsecs string, claims map[string]any) error {
+	// CVE-2026-33322: HMAC (HS256/384/512) is intentionally not accepted,
+	// ID tokens must be signed with an asymmetric key from the JWKS.
 	jp := new(jwtgo.Parser)
 	jp.ValidMethods = []string{
 		"RS256", "RS384", "RS512",
 		"ES256", "ES384", "ES512",
-		"HS256", "HS384", "HS512",
 		"RS3256", "RS3384", "RS3512",
 		"ES3256", "ES3384", "ES3512",
 	}
 
 	keyFuncCallback := func(jwtToken *jwtgo.Token) (any, error) {
+		if _, ok := jwtToken.Method.(*jwtgo.SigningMethodHMAC); ok {
+			return nil, fmt.Errorf("Unsupported signing method %v", jwtToken.Header["alg"])
+		}
 		kid, ok := jwtToken.Header["kid"].(string)
 		if !ok {
 			return nil, fmt.Errorf("Invalid kid value %v", jwtToken.Header["kid"])
@@ -168,7 +173,7 @@ func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, 
 		if err = r.PopulatePublicKey(arn); err != nil {
 			return err
 		}
-		jwtToken, err = jwtgo.ParseWithClaims(token, &mclaims, keyFuncCallback)
+		jwtToken, err = jp.ParseWithClaims(token, &mclaims, keyFuncCallback)
 		if err != nil {
 			return err
 		}
