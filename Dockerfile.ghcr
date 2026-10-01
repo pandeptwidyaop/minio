@@ -1,0 +1,58 @@
+# Builds MinIO from source for this fork and publishes to GHCR.
+# Unlike Dockerfile.release, it does not download binaries from dl.min.io:
+# upstream community releases stopped, and they would not contain this
+# fork's security backports anyway.
+
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+# Generated in CI by buildscripts/gen-ldflags.go (.git is excluded from the
+# build context, so it cannot be computed here).
+ARG LDFLAGS="-s -w"
+
+ENV CGO_ENABLED=0 \
+    GOTOOLCHAIN=auto
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -tags kqueue -trimpath -ldflags "${LDFLAGS}" -o /out/minio .
+
+FROM alpine:3.22
+
+ARG VERSION=dev
+
+LABEL org.opencontainers.image.title="MinIO (pandeptwidyaop fork)" \
+      org.opencontainers.image.description="MinIO community edition with backported security fixes." \
+      org.opencontainers.image.source="https://github.com/pandeptwidyaop/minio" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.version="${VERSION}"
+
+RUN apk add --no-cache ca-certificates curl
+
+ENV MINIO_ACCESS_KEY_FILE=access_key \
+    MINIO_SECRET_KEY_FILE=secret_key \
+    MINIO_ROOT_USER_FILE=access_key \
+    MINIO_ROOT_PASSWORD_FILE=secret_key \
+    MINIO_KMS_SECRET_KEY_FILE=kms_master_key \
+    MINIO_CONFIG_ENV_FILE=config.env
+
+COPY --from=build /out/minio /usr/bin/minio
+COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+COPY CREDITS /licenses/CREDITS
+COPY LICENSE /licenses/LICENSE
+
+RUN chmod +x /usr/bin/minio /usr/bin/docker-entrypoint.sh
+
+EXPOSE 9000
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+CMD ["minio"]
