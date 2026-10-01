@@ -24,7 +24,16 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	xhttp "github.com/minio/minio/internal/http"
 )
+
+// unsignedTrailerHasCredentials reports whether an unsigned-trailer request
+// carries any credentials, in which case its signature must be verified.
+// Checking only the Authorization header is not enough (CVE-2026-41145).
+func unsignedTrailerHasCredentials(r *http.Request) bool {
+	return r.Header.Get(xhttp.Authorization) != "" || r.Form.Get(xhttp.AmzCredential) != ""
+}
 
 // newUnsignedV4ChunkedReader returns a new s3UnsignedChunkedReader that translates the data read from r
 // out of HTTP "chunked" format before returning it.

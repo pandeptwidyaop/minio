@@ -1896,7 +1896,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		}
 	case authTypeStreamingUnsignedTrailer:
 		// Initialize stream chunked reader with optional trailers.
-		rd, s3Err = newUnsignedV4ChunkedReader(r, true, r.Header.Get(xhttp.Authorization) != "")
+		rd, s3Err = newUnsignedV4ChunkedReader(r, true, unsignedTrailerHasCredentials(r))
 		if s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
@@ -2292,6 +2292,14 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 	case authTypeStreamingSigned, authTypeStreamingSignedTrailer:
 		// Initialize stream signature verifier.
 		reader, s3Err = newSignV4ChunkedReader(r, rAuthType == authTypeStreamingSignedTrailer)
+		if s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
+	case authTypeStreamingUnsignedTrailer:
+		// CVE-2026-40344: this case was missing, so unsigned-trailer uploads
+		// fell through the switch with no signature verification at all.
+		reader, s3Err = newUnsignedV4ChunkedReader(r, true, unsignedTrailerHasCredentials(r))
 		if s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return

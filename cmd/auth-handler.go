@@ -731,6 +731,13 @@ func isPutActionAllowed(ctx context.Context, atype authType, bucketName, objectN
 	case authTypeStreamingSigned, authTypePresigned, authTypeSigned, authTypeStreamingSignedTrailer:
 		cred, owner, s3Err = getReqAccessKeyV4(r, region, serviceS3)
 	case authTypeStreamingUnsignedTrailer:
+		// CVE-2026-41145: unsigned-trailer uploads are only ever signed via
+		// the Authorization header. Credentials in the query string would be
+		// trusted here for authorization but never verified cryptographically,
+		// so reject them outright.
+		if r.Form.Get(xhttp.AmzCredential) != "" {
+			return ErrSignatureVersionNotSupported
+		}
 		cred, owner, s3Err = getReqAccessKeyV4(r, region, serviceS3)
 		if s3Err == ErrMissingFields {
 			// Could be anonymous. cred + owner is zero value.
