@@ -131,6 +131,8 @@ func runAllTests(suite *TestSuiteCommon, c *check) {
 	suite.TestUnsignedTrailerQueryCredentialCVE(c)
 	suite.TestSnowballUnsignedTrailerCVE(c)
 	suite.TestUnsignedTrailerLegitUploads(c)
+	suite.TestReplicationSSEHeaderInjectionCVE(c)
+	suite.TestReplicationSSEHeaderLegitimateCVE(c)
 	suite.TearDownSuite(c)
 }
 
