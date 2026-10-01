@@ -1,0 +1,123 @@
+name: Release & Docker image
+
+# - push to master : release-please updates its release PR. Image is pushed
+#                    as :edge and :sha-<short>.
+# - release PR merged: tag vX.Y.Z + GitHub Release are created, and the image
+#                    is pushed as :X.Y.Z, :X.Y, :X and :latest.
+# - pull request   : amd64 build only, nothing is pushed.
+#
+# The tag is created with GITHUB_TOKEN, which does not trigger other
+# workflows. That's why the image build lives in this same workflow and
+# reads the release-please outputs, instead of listening for tag pushes.
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel master runs: that could kill a release build halfway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/minio
+
+jobs:
+  release-please:
+    name: Release please
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  docker:
+    name: Build and push image
+    needs: release-please
+    # release-please is skipped on PRs and manual runs, so don't depend on
+    # it succeeding, only on it not failing.
+    if: ${{ !cancelled() && needs.release-please.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASED: ${{ needs.release-please.outputs.release_created == 'true' }}
+      TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Generate ldflags
+        id: ldflags
+        run: |
+          if [ "$RELEASED" = "true" ]; then
+            suffix="fork.${TAG_NAME}"
+          else
+            suffix="fork.$(git rev-parse --short HEAD)"
+          fi
+          echo "value=$(MINIO_RELEASE=RELEASE MINIO_HOTFIX="$suffix" go run buildscripts/gen-ldflags.go)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.TAG_NAME }},enable=${{ env.RELEASED }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG_NAME }},enable=${{ env.RELEASED }}
+            type=semver,pattern={{major}},value=${{ env.TAG_NAME }},enable=${{ env.RELEASED }}
+            type=raw,value=latest,enable=${{ env.RELEASED }}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=sha,format=short
+            type=ref,event=pr
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ghcr
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            LDFLAGS=${{ steps.ldflags.outputs.value }}
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
