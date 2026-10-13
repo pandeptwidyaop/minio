@@ -6,7 +6,6 @@
     ".": {
       "release-type": "simple",
       "package-name": "minio",
-      "release-as": "1.0.0",
       "changelog-sections": [
         { "type": "security", "section": "Security", "hidden": false },
         { "type": "feat", "section": "Features", "hidden": false },
